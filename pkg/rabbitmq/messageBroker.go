@@ -2,80 +2,62 @@ package rabbitmq
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"github.com/streadway/amqp"
 	"log"
 	"time"
 )
 
-type MessageBroker interface {
-	CreateChannel() (*Channel, error)
-	CreateConnection(ctx context.Context, params MessageBrokerParameters) error
-	SignalConnectionStatus(status bool)
-	SignalConnection() chan bool
-	IsConnected() bool
-}
-
-type MessageBrokerParameters struct {
-	Nodes             []string
-	PrefetchCount     int
-	RetryCount        int
-	RetryInterval     time.Duration
-	ConcurrentLimit   int
-	UserName          string
-	Password          string
-	SelectedNodeIndex int
-	VirtualHost       string
-}
-
-type Channel struct {
-	RabbitMqChannel    *amqp.Channel
-	PrefetchCount      int
-	RetryCount         int
-	ConcurrentLimit    int
-	NotifyConfirmation chan amqp.Confirmation
-}
-
-type Broker struct {
-	Parameters              MessageBrokerParameters
-	Connection              *amqp.Connection
-	ConnectionNotifyChannel chan bool
-	logger                  log.Logger
-}
-
-func (b *Broker) CreateChannel() (*Channel, error) {
-
-	rabbitChannel, err := b.Connection.Channel()
-	if err != nil {
-		return nil, err
+type (
+	MessageBroker interface {
+		CreateChannel() (*Channel, error)
+		CreateConnection(ctx context.Context, parameters MessageBrokerParameter) error
+		SignalConnectionStatus(status bool)
+		SignalConnection() chan bool
+		IsConnected() bool
 	}
 
-	var brokerChannel = Channel{
-		RabbitMqChannel:    rabbitChannel,
-		PrefetchCount:      b.Parameters.PrefetchCount,
-		RetryCount:         b.Parameters.RetryCount,
-		ConcurrentLimit:    b.Parameters.ConcurrentLimit,
-		NotifyConfirmation: make(chan amqp.Confirmation, 1),
+	MessageBrokerParameter struct {
+		Nodes             []string
+		PrefetchCount     int
+		RetryCount        int
+		RetryInterval     time.Duration
+		ConcurrentLimit   int
+		UserName          string
+		Password          string
+		selectedNodeIndex int
+		VirtualHost       string
 	}
 
-	return &brokerChannel, nil
-}
+	Channel struct {
+		rabbitChannel   *amqp.Channel
+		prefetchCount   int
+		retryCount      int
+		concurrentLimit int
+		notifyConfirm   chan amqp.Confirmation
+	}
+	broker struct {
+		parameters        MessageBrokerParameter
+		connection        *amqp.Connection
+		connNotifyChannel chan bool
+		logger            log.Logger
+	}
+)
 
-func (b *Broker) CreateConnection(ctx context.Context, parameters MessageBrokerParameters) error {
+func (b *broker) CreateConnection(ctx context.Context, parameters MessageBrokerParameter) error {
 
 	var err error
 
-	b.Parameters = parameters
+	b.parameters = parameters
 
 	for {
 
-		b.Connection, err = amqp.Dial(b.chooseNode(ctx)) //amqp.Dial(b.chooseNode(ctx))
-		if err != nil {
-			time.Sleep(ReconnectDelay)
+		if b.connection, err = amqp.Dial(b.chooseNode(ctx)); err != nil {
+			time.Sleep(reconnectDelay)
 			//b.logger.Exception(ctx, "Application Retried To Connect RabbitMq", err)
 			continue
 		}
-
 		b.onClose(ctx)
 		//b.logger.Info(ctx, "Application  Connected RabbitMq")
 		b.SignalConnectionStatus(true)
@@ -84,24 +66,25 @@ func (b *Broker) CreateConnection(ctx context.Context, parameters MessageBrokerP
 	}
 
 	return err
+
 }
 
-func (b *Broker) chooseNode(ctx context.Context) string {
+func (b *broker) chooseNode(ctx context.Context) string {
 
-	if b.Parameters.SelectedNodeIndex == len(b.Parameters.Nodes) {
-		b.Parameters.SelectedNodeIndex = 0
+	if b.parameters.selectedNodeIndex == len(b.parameters.Nodes) {
+		b.parameters.selectedNodeIndex = 0
 	}
 
-	var selectedNode = b.Parameters.Nodes[b.Parameters.SelectedNodeIndex]
-	b.Parameters.SelectedNodeIndex++
+	var selectedNode = b.parameters.Nodes[b.parameters.selectedNodeIndex]
+	b.parameters.selectedNodeIndex++
 	//b.logger.Info(ctx, fmt.Sprintf("Started To Listen On Node %s", selectedNode))
-	return fmt.Sprintf("amqp://%s:%s@%s/%s", b.Parameters.UserName, b.Parameters.Password, selectedNode, b.Parameters.VirtualHost)
+	return fmt.Sprintf("amqp://%s:%s@%s/%s", b.parameters.UserName, b.parameters.Password, selectedNode, b.parameters.VirtualHost)
 
 }
 
-func (b *Broker) onClose(ctx context.Context) {
+func (b *broker) onClose(ctx context.Context) {
 	go func() {
-		err := <-b.Connection.NotifyClose(make(chan *amqp.Error))
+		err := <-b.connection.NotifyClose(make(chan *amqp.Error))
 		if err != nil {
 			//b.logger.Exception(ctx, "Rabbitmq Connection is Down", err)
 			b.SignalConnectionStatus(false)
@@ -110,48 +93,118 @@ func (b *Broker) onClose(ctx context.Context) {
 	}()
 }
 
-func (b *Broker) SignalConnectionStatus(status bool) {
+func (b *broker) IsConnected() bool {
+	if b.connection == nil {
+		return false
+	}
+	return b.connection.IsClosed() == false
+}
+
+func (b *broker) CreateChannel() (*Channel, error) {
+
+	rabbitChannel, err := b.connection.Channel()
+	if err != nil {
+		return nil, err
+	}
+
+	var brokerChannel = Channel{
+		rabbitChannel:   rabbitChannel,
+		prefetchCount:   b.parameters.PrefetchCount,
+		retryCount:      b.parameters.RetryCount,
+		concurrentLimit: b.parameters.ConcurrentLimit,
+		notifyConfirm:   make(chan amqp.Confirmation, 1),
+	}
+
+	return &brokerChannel, nil
+}
+
+func (b *broker) SignalConnectionStatus(status bool) {
 	go func() {
-		b.ConnectionNotifyChannel <- status
+		b.connNotifyChannel <- status
 	}()
+}
+
+func (b *broker) SignalConnection() chan bool {
+	return b.connNotifyChannel
+}
+
+func NewMessageBroker(logger log.Logger) MessageBroker {
+	brokerClient := &broker{connNotifyChannel: make(chan bool), logger: logger}
+	brokerClient.SignalConnectionStatus(false)
+
+	return brokerClient
+}
+
+func (c *Channel) createExchange(exchange string, exchangeType ExchangeType, args amqp.Table) *Channel {
+	c.rabbitChannel.ExchangeDeclare(exchange, convertExchangeType(exchangeType), true, false, false, false, args)
+	return c
+
 }
 
 func (c *Channel) createQueue(queueName string) *Channel {
 
-	c.RabbitMqChannel.QueueDeclare(queueName, true, false, false, false, nil)
+	c.rabbitChannel.QueueDeclare(queueName, true, false, false, false, nil)
 
+	return c
+
+}
+
+func (c *Channel) exchangeToQueueBind(exchange string, queueName string, routingKey string, exchangeType ExchangeType) *Channel {
+	c.rabbitChannel.ExchangeDeclare(exchange, convertExchangeType(exchangeType), true, false, false, false, nil)
+	c.rabbitChannel.QueueBind(queueName, routingKey, exchange, false, nil)
 	return c
 }
 
-func (c *Channel) exchangeToQueueBind(exchange string, queueName string, routingKey string, exchangeType int) *Channel {
-	c.RabbitMqChannel.ExchangeDeclare(exchange, string(rune(exchangeType)), true, false, false, false, nil)
-	c.RabbitMqChannel.QueueBind(queueName, routingKey, exchange, false, nil)
+func (c *Channel) exchangeToConsistentExchangeBind(destinationExchange string, sourceExchange string, routingKey string, exchangeType ExchangeType) *Channel {
+	c.rabbitChannel.ExchangeDeclare(sourceExchange, convertExchangeType(exchangeType), true, false, false, false, nil)
+	c.rabbitChannel.ExchangeBind(destinationExchange, routingKey, sourceExchange, false, nil)
 	return c
 }
-
 func (c *Channel) createErrorQueueAndBind(errorExchangeName string, errorQueueName string) *Channel {
-	c.RabbitMqChannel.ExchangeDeclare(errorExchangeName, "fanout", true, false, false, false, nil)
-	q, _ := c.RabbitMqChannel.QueueDeclare(errorQueueName, true, false, false, false, nil)
-	c.RabbitMqChannel.QueueBind(q.Name, "", errorExchangeName, false, nil)
+	c.rabbitChannel.ExchangeDeclare(errorExchangeName, "fanout", true, false, false, false, nil)
+	q, _ := c.rabbitChannel.QueueDeclare(errorQueueName, true, false, false, false, nil)
+	c.rabbitChannel.QueueBind(q.Name, "", errorExchangeName, false, nil)
 	return c
 
 }
 
-func (c *Channel) createExchange(exchange string, exchangeType int, args amqp.Table) *Channel {
-	c.RabbitMqChannel.ExchangeDeclare(exchange, string(rune(exchangeType)), true, false, false, false, args)
-	return c
+func (p *Channel) Publish(ctx context.Context, routingKey string, exchangeName string, payload interface{}) error {
+	var message, err = publishExchangeToMessage("", payload)
 
+	if err != nil {
+		return err
+	}
+	return p.rabbitChannel.Publish(exchangeName, routingKey, false, false, message)
 }
 
-func (c *Channel) exchangeToConsistentExchangeBind(destinationExchange string, sourceExchange string, routingKey string, exchangeType int) *Channel {
-	c.RabbitMqChannel.ExchangeDeclare(sourceExchange, string(rune(exchangeType)), true, false, false, false, nil)
-	c.RabbitMqChannel.ExchangeBind(destinationExchange, routingKey, sourceExchange, false, nil)
-	return c
+func publishExchangeToMessage(correlationId string, payload interface{}) (amqp.Publishing, error) {
+
+	var (
+		bytes []byte
+		err   error
+	)
+
+	if bytes, err = json.Marshal(payload); err != nil {
+		return amqp.Publishing{}, err
+	}
+
+	headers := make(map[string]interface{})
+	headers[headerTime] = time.Now().String()
+	return amqp.Publishing{
+		MessageId:       getGuid(),
+		Body:            bytes,
+		Headers:         headers,
+		CorrelationId:   correlationId,
+		Timestamp:       time.Now(),
+		DeliveryMode:    deliveryMode,
+		ContentEncoding: "UTF-8",
+		ContentType:     "application/json",
+	}, nil
 }
 
 func (b Channel) listenToQueue(queueName string) (<-chan amqp.Delivery, error) {
 
-	msg, err := b.RabbitMqChannel.Consume(queueName,
+	msg, err := b.rabbitChannel.Consume(queueName,
 		"",
 		false,
 		false,

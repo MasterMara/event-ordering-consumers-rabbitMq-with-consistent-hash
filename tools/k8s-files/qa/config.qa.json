@@ -1,17 +1,15 @@
 {
-  "debug": true,
-  "server": {
-    "address": ":9090"
-  },
-  "context":{
-    "timeout":2
-  },
-  "database": {
-    "host": "mysql",
-    "port": "3306",
-    "user": "user",
-    "pass": "password",
-    "name": "article"
+  "BusSettings": {
+    "HostAddress": "rabbitmq://rabbit@163bc2ad6579",
+    "ClusterMembers": [
+      "127.0.0.1"
+    ],
+    "Username": "MasterMara",
+    "Password": "123456",
+    "Heartbeat": 5,
+    "PrefetchCount": 5,
+    "ConcurrencyLimit": 5,
+    "AutoDelete": false,
+    "Durable": true
   }
-
 }

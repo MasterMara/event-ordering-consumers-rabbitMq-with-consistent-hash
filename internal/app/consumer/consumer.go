@@ -31,12 +31,12 @@ func (c *ConsumerBuilder) RunConsumer(ctx context.Context) error {
 
 	for i := 0; i < c.queueCount; i++ {
 
-		consumer := c.messageBus.AddConsumerWithConsistentHashExchange(formatQueueName(constant.QueueName, i), "1", constant.QueueName)
+		consumer := c.messageBus.AddConsumerWithConsistentHashExchange(fmt.Sprintf("%s-%d", constant.QueueName, i+1), "1", constant.QueueName)
 
-		consumer.SubscribeExchange(constant.RoutingKey, rabbitmq.TopicExchange, constant.OrderLineCreatedExchange)
-		consumer.SubscribeExchange(constant.RoutingKey, rabbitmq.TopicExchange, constant.OrderLineInProgressedExchange)
-		consumer.SubscribeExchange(constant.RoutingKey, rabbitmq.TopicExchange, constant.OrderLineInTransittedExchange)
-		consumer.SubscribeExchange(constant.RoutingKey, rabbitmq.TopicExchange, constant.OrderLineDeliveredExchange)
+		consumer.SubscriberExchange(constant.RoutingKey, rabbitmq.Topic, constant.OrderLineCreatedExchange)
+		consumer.SubscriberExchange(constant.RoutingKey, rabbitmq.Topic, constant.OrderLineInProgressedExchange)
+		consumer.SubscriberExchange(constant.RoutingKey, rabbitmq.Topic, constant.OrderLineInTransittedExchange)
+		consumer.SubscriberExchange(constant.RoutingKey, rabbitmq.Topic, constant.OrderLineDeliveredExchange)
 
 		consumer.WithSingleGoroutine(true)
 

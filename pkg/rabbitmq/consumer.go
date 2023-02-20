@@ -5,59 +5,43 @@ import (
 	"time"
 )
 
-const (
-	DirectExchange = iota + 1
-	FanoutExchange
-	TopicExchange
-	ConsistentHashExchange
-)
-
-type ConsumerBuilder struct {
-	consumers     []*Consumer
-	messageBroker MessageBroker
-}
-
-type Exchange struct {
-	exchangeName string
-	routingKey   string
-	exchangeType int
-	args         amqp.Table
-}
-
-type Message struct {
-	Payload       []byte
-	CorrelationId string
-	MessageId     string
-	TimeStamp     time.Time
-}
-
-type Consumer struct {
-	queueName                  string
-	errorQueueName             string
-	errorExchangeName          string
-	startConsumerChannel       chan bool
-	singleGoroutine            bool
-	exchanges                  []Exchange
-	consistentHashRoutingKey   string
-	consistentHashExchangeType int
-	consistentExchangeName     string
-	handleConsumer             handleConsumer
-}
-
-type handleConsumer func(message Message) error
-
-func (c *Consumer) SubscribeExchange(routingKey string, exchangeType int, exchangeName string) *Consumer {
-
-	if c.checkIsAlreadyDeclaredExchange(exchangeName, routingKey) {
-		return c
+type (
+	ConsumerBuilder struct {
+		messageBroker MessageBroker
+		consumers     []*Consumer
 	}
 
-	c.exchanges = append(c.exchanges, Exchange{
-		exchangeName: exchangeName,
-		exchangeType: exchangeType,
-		routingKey:   routingKey,
-	})
+	Consumer struct {
+		queueName              string
+		handleConsumer         handleConsumer
+		errorQueueName         string
+		errorExchangeName      string
+		startConsumerCn        chan bool
+		singleGoroutine        bool
+		exchanges              []exchange
+		consistentRoutingKey   string
+		consistentExchangeType ExchangeType
+		consistentExchangeName string
+	}
+	Message struct {
+		Payload       []byte
+		CorrelationId string
+		MessageId     string
+		Timestamp     time.Time
+	}
 
+	exchange struct {
+		exchangeName string
+		routingKey   string
+		exchangeType ExchangeType
+		args         amqp.Table
+	}
+
+	handleConsumer func(message Message) error
+)
+
+func (c *Consumer) HandleConsumer(consumer handleConsumer) *Consumer {
+	c.handleConsumer = consumer
 	return c
 }
 
@@ -66,20 +50,43 @@ func (c *Consumer) WithSingleGoroutine(value bool) *Consumer {
 	return c
 }
 
-func (c *Consumer) HandleConsumer(consumer handleConsumer) *Consumer {
-	c.handleConsumer = consumer
-	return c
-}
+func (c *Consumer) SubscriberExchange(routingKey string, exchangeType ExchangeType, exchangeName string) *Consumer {
 
-func (c *Consumer) checkIsAlreadyDeclaredExchange(exchangeName string, routingKey string) bool {
+	var isAlreadyDeclareExchange bool
 
-	var isAlreadyDeclaredExchange bool
-
-	for _, exchange := range c.exchanges {
-		if exchange.exchangeName == exchangeName && exchange.routingKey == routingKey {
-			isAlreadyDeclaredExchange = true
+	for _, item := range c.exchanges {
+		if item.exchangeName == exchangeName && item.routingKey == routingKey {
+			isAlreadyDeclareExchange = true
 		}
 	}
 
-	return isAlreadyDeclaredExchange
+	if isAlreadyDeclareExchange {
+		return c
+	}
+
+	c.exchanges = append(c.exchanges, exchange{exchangeName: exchangeName, exchangeType: exchangeType, routingKey: routingKey})
+	return c
+}
+
+func (c *Consumer) SubscriberExchangeWithArguments(routingKey string, exchangeType ExchangeType, exchangeName string, args amqp.Table) *Consumer {
+
+	var isAlreadyDeclareExchange bool
+
+	for _, item := range c.exchanges {
+		if item.exchangeName == exchangeName {
+			isAlreadyDeclareExchange = true
+		}
+	}
+
+	if isAlreadyDeclareExchange {
+		return c
+	}
+
+	c.exchanges = append(c.exchanges, exchange{
+		exchangeName: exchangeName,
+		exchangeType: exchangeType,
+		routingKey:   routingKey,
+		args:         args,
+	})
+	return c
 }

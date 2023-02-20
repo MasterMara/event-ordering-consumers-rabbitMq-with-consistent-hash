@@ -3,25 +3,22 @@ package main
 import (
 	app "event-ordering-consumers-rabbitmq-with-consistent-hash/internal/app/consumer"
 	"github.com/spf13/viper"
-	"log"
 )
 
 func initConfigs() {
 
 	//Set Configs.
-	viper.SetConfigFile(`config.qa.json`)
+	viper.SetConfigFile(`C:\Users\musta\OneDrive\Masaüstü\event-ordering-consumers-rabbitMq-with-consistent-hash\tools\k8s-files\qa\config.qa.json`)
 	err := viper.ReadInConfig()
 	if err != nil {
 		panic(err)
 	}
 
-	if viper.GetBool(`debug`) {
-		log.Println("Service RUN on DEBUG mode")
-	}
-
 }
 
 func main() {
+
+	//https://luturol.github.io/docker/mongodb/Using-MongoDB-with-Docker --> Mongo
 
 	// Initialize Config File.
 	initConfigs()

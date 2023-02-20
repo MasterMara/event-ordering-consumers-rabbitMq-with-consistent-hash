@@ -3,7 +3,6 @@ package rabbitmq
 import (
 	"context"
 	"encoding/json"
-	utils "event-ordering-consumers-rabbitmq-with-consistent-hash/pkg/util"
 	"github.com/streadway/amqp"
 	"reflect"
 	"strconv"
@@ -35,7 +34,7 @@ type (
 	Publisher struct {
 		isAlreadyCreated bool
 		exchangeName     string
-		exchangeType     int
+		exchangeType     ExchangeType
 		payloadTypes     []reflect.Type
 	}
 )
@@ -49,7 +48,7 @@ func errorPublishMessage(correlationId string, payload []byte, retryCount int, e
 	headers[headerTime] = time.Now().String()
 
 	return amqp.Publishing{
-		MessageId:       utils.GetGuid(),
+		MessageId:       getGuid(),
 		Body:            payload,
 		Headers:         headers,
 		CorrelationId:   correlationId,
@@ -93,11 +92,11 @@ func (p *PublisherBuilder) Publish(ctx context.Context, routingKey string, excha
 		return err
 	}
 
-	err = p.brokerChannel.RabbitMqChannel.Publish(exchangeName, routingKey, false, false, message)
+	err = p.brokerChannel.rabbitChannel.Publish(exchangeName, routingKey, false, false, message)
 
 	select {
 
-	case confirm := <-p.brokerChannel.NotifyConfirmation:
+	case confirm := <-p.brokerChannel.notifyConfirm:
 		if confirm.Ack {
 			break
 		}
@@ -115,7 +114,7 @@ func publishMessage(correlationId string, payload interface{}) (amqp.Publishing,
 	bodyJson, err := json.Marshal(payload)
 
 	return amqp.Publishing{
-		MessageId:       utils.GetGuid(),
+		MessageId:       getGuid(),
 		Body:            bodyJson,
 		Headers:         headers,
 		CorrelationId:   correlationId,
@@ -137,13 +136,12 @@ func (p *PublisherBuilder) CreateChannel() {
 
 			case isConnected := <-p.startPublisherCh:
 				if isConnected {
-					p.brokerChannel, err = p.messageBroker.CreateChannel()
-					if err != nil {
+					if p.brokerChannel, err = p.messageBroker.CreateChannel(); err != nil {
 						panic(err)
 					}
 					p.isChannelActive = true
 
-					p.brokerChannel.RabbitMqChannel.NotifyPublish(p.brokerChannel.NotifyConfirmation)
+					p.brokerChannel.rabbitChannel.NotifyPublish(p.brokerChannel.notifyConfirm)
 
 				} else {
 					p.isChannelActive = false
