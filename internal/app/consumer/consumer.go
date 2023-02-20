@@ -43,7 +43,7 @@ func (c *ConsumerBuilder) RunConsumer(ctx context.Context) error {
 		consumer.HandleConsumer(c.ConsumerOrderLineEvents())
 	}
 
-	return c.messageBus.Run
+	return c.messageBus.RunConsumers(ctx)
 
 }
 

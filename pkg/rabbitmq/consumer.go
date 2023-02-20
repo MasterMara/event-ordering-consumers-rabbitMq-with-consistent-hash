@@ -13,7 +13,8 @@ const (
 )
 
 type ConsumerBuilder struct {
-	consumers []*Consumer
+	consumers     []*Consumer
+	messageBroker MessageBroker
 }
 
 type Exchange struct {

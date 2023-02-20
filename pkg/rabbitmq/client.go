@@ -3,8 +3,11 @@ package rabbitmq
 import (
 	"context"
 	"fmt"
+	"github.com/streadway/amqp"
+	"golang.org/x/sync/errgroup"
 	"net"
 	"os"
+	"runtime"
 	"time"
 )
 
@@ -22,9 +25,14 @@ var (
 )
 
 type Client struct {
-	context          context.Context
-	shutDownFunction context.CancelFunc
-	consumerBuilder  ConsumerBuilder
+	context            context.Context
+	shutdownFn         context.CancelFunc
+	childRoutines      *errgroup.Group
+	parameters         MessageBrokerParameters
+	shutdownReason     string
+	shutdownInProgress bool
+	consumerBuilder    ConsumerBuilder
+	publisherBuilder   *PublisherBuilder
 }
 
 func (c *Client) RunConsumers(ctx context.Context) error {
@@ -36,74 +44,77 @@ func (c *Client) RunConsumers(ctx context.Context) error {
 	for _, consumer := range c.consumerBuilder.consumers {
 
 		consumer := consumer
-		c.childRoutines.Go(func() error {
+		c.childRoutines.Go(
+			func() error {
 
-			for {
-				select {
-				case isConnected := <-consumer.startConsumerCn:
+				for {
+					select {
+					case isConnected := <-consumer.startConsumerChannel:
 
-					if isConnected {
+						if isConnected {
 
-						var (
-							err           error
-							brokerChannel *Channel
-						)
-						if brokerChannel, err = c.consumerBuilder.messageBroker.CreateChannel(); err != nil {
-							panic(err)
-						}
+							var (
+								err           error
+								brokerChannel *Channel
+							)
 
-						if consumer.consistentExchangeType == ConsistentHashing {
+							brokerChannel, err = c.consumerBuilder.messageBroker.CreateChannel()
+							if err != nil {
+								panic(err)
+							}
 
-							brokerChannel.createQueue(consumer.queueName).
-								exchangeToQueueBind(consumer.consistentExchangeName, consumer.queueName, consumer.consistentRoutingKey, consumer.consistentExchangeType).
-								createErrorQueueAndBind(consumer.errorExchangeName, consumer.errorQueueName)
+							if consumer.consistentHashExchangeType == ConsistentHashExchange {
 
-						} else {
-
-							brokerChannel.createQueue(consumer.queueName).
-								createErrorQueueAndBind(consumer.errorExchangeName, consumer.errorQueueName)
-
-						}
-
-						for _, item := range consumer.exchanges {
-
-							if consumer.consistentExchangeType == ConsistentHashing {
-
-								brokerChannel.
-									createExchange(item.exchangeName, item.exchangeType, item.args).
-									exchangeToConsistentExchangeBind(consumer.consistentExchangeName, item.exchangeName, item.routingKey, item.exchangeType)
+								brokerChannel.createQueue(consumer.queueName).
+									exchangeToQueueBind(consumer.consistentExchangeName, consumer.queueName, consumer.consistentHashRoutingKey, consumer.consistentHashExchangeType).
+									createErrorQueueAndBind(consumer.errorExchangeName, consumer.errorQueueName)
 
 							} else {
-								brokerChannel.
-									createExchange(item.exchangeName, item.exchangeType, item.args).
-									exchangeToQueueBind(item.exchangeName, consumer.queueName, item.routingKey, item.exchangeType)
+
+								brokerChannel.createQueue(consumer.queueName).
+									createErrorQueueAndBind(consumer.errorExchangeName, consumer.errorQueueName)
 
 							}
 
-						}
+							for _, item := range consumer.exchanges {
 
-						brokerChannel.rabbitChannel.Qos(c.parameters.PrefetchCount, 0, false)
+								if consumer.consistentHashExchangeType == ConsistentHashExchange {
 
-						delivery, _ := brokerChannel.listenToQueue(consumer.queueName)
+									brokerChannel.
+										createExchange(item.exchangeName, item.exchangeType, item.args).
+										exchangeToConsistentExchangeBind(consumer.consistentExchangeName, item.exchangeName, item.routingKey, item.exchangeType)
 
-						if consumer.singleGoroutine {
+								} else {
+									brokerChannel.
+										createExchange(item.exchangeName, item.exchangeType, item.args).
+										exchangeToQueueBind(item.exchangeName, consumer.queueName, item.routingKey, item.exchangeType)
 
-							c.deliver(brokerChannel, consumer, delivery)
+								}
 
-						} else {
+							}
 
-							for i := 0; i < c.parameters.PrefetchCount; i++ {
-								go func() {
-									c.deliver(brokerChannel, consumer, delivery)
-								}()
+							brokerChannel.RabbitMqChannel.Qos(c.parameters.PrefetchCount, 0, false)
+
+							delivery, _ := brokerChannel.listenToQueue(consumer.queueName)
+
+							if consumer.singleGoroutine {
+
+								c.deliver(brokerChannel, consumer, delivery)
+
+							} else {
+
+								for i := 0; i < c.parameters.PrefetchCount; i++ {
+									go func() {
+										c.deliver(brokerChannel, consumer, delivery)
+									}()
+								}
 							}
 						}
 					}
 				}
-			}
 
-			return nil
-		})
+				return nil
+			})
 	}
 
 	return c.childRoutines.Wait()
@@ -142,6 +153,78 @@ func (c *Client) checkIsAlreadyDeclaredQueue(queueName string) bool {
 	}
 
 	return isAlreadyDeclaredQueue
+}
+
+func (c *Client) checkConsumerConnection(ctx context.Context) {
+
+	go func() {
+
+		for {
+			select {
+
+			case isConnected := <-c.consumerBuilder.messageBroker.SignalConnection():
+				if !isConnected {
+					c.consumerBuilder.messageBroker.CreateConnection(ctx, c.parameters)
+					for _, consumer := range c.consumerBuilder.consumers {
+						consumer.startConsumerChannel <- true
+					}
+				}
+			}
+		}
+
+	}()
+}
+
+func (c *Client) deliver(brokerChannel *Channel, consumer *Consumer, delivery <-chan amqp.Delivery) {
+	for d := range delivery {
+
+		Do(func(attempt int) (retry bool, err error) {
+
+			retry = attempt < c.parameters.RetryCount
+
+			defer func() {
+
+				if r := recover(); r != nil {
+
+					if !retry || err == nil {
+
+						err, ok := r.(error)
+
+						if !ok {
+							retry = false //Because of panic exception
+							err = fmt.Errorf("%v", r)
+						}
+
+						stack := make([]byte, 4<<10)
+						length := runtime.Stack(stack, false)
+
+						brokerChannel.RabbitMqChannel.Publish(consumer.errorExchangeName, "", false, false, errorPublishMessage(d.CorrelationId, d.Body, c.parameters.RetryCount, err, fmt.Sprintf("[Exception Recover] %v %s\n", err, stack[:length])))
+
+						select {
+						case confirm := <-brokerChannel.NotifyConfirmation:
+							if confirm.Ack {
+								break
+							}
+						case <-time.After(resendDelay):
+						}
+
+						d.Ack(false)
+					}
+					return
+				}
+			}()
+			err = consumer.handleConsumer(Message{CorrelationId: d.CorrelationId, Payload: d.Body, MessageId: d.MessageId, TimeStamp: d.Timestamp})
+			if err != nil {
+				if retry {
+					time.Sleep(c.parameters.RetryInterval)
+				}
+				panic(err)
+			}
+			d.Ack(false)
+
+			return
+		})
+	}
 }
 
 func checkIsEmptyRabbitComponentValues(routingKey string, queueName string, exchangeName string) {
